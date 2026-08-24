@@ -182,20 +182,72 @@ impl VersionedTransactionConfiguration {
 mod tests {
     use {
         super::*,
+        crate::runtime_transaction::RuntimeTransaction,
         solana_compute_budget_interface::ComputeBudgetInstruction,
-        solana_keypair::Keypair,
-        solana_message::Message,
+        solana_message::{Message, VersionedMessage, v0},
         solana_program_entrypoint::HEAP_LENGTH,
-        solana_signer::Signer,
+        solana_signature::Signature,
         solana_svm_transaction::svm_message::SVMStaticMessage,
-        solana_transaction::{Transaction, sanitized::SanitizedTransaction},
+        solana_transaction::{
+            Transaction,
+            sanitized::{MessageHash, SanitizedTransaction},
+            versioned::{VersionedTransaction, sanitized::SanitizedVersionedTransaction},
+        },
     };
+
+    #[derive(Clone, Copy)]
+    enum LegacyOrV0 {
+        Legacy,
+        V0,
+    }
+
+    fn runtime_priority_fee(version: LegacyOrV0, price: u64, limit: u32) -> u64 {
+        let payer = Pubkey::new_from_array([7; 32]);
+        let instructions = [
+            ComputeBudgetInstruction::set_compute_unit_price(price),
+            ComputeBudgetInstruction::set_compute_unit_limit(limit),
+        ];
+        let message = match version {
+            LegacyOrV0::Legacy => {
+                VersionedMessage::Legacy(Message::new(&instructions, Some(&payer)))
+            }
+            LegacyOrV0::V0 => VersionedMessage::V0(
+                v0::Message::try_compile(&payer, &instructions, &[], Hash::default()).unwrap(),
+            ),
+        };
+        let transaction = SanitizedVersionedTransaction::try_from(VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message,
+        })
+        .unwrap();
+        RuntimeTransaction::<SanitizedVersionedTransaction>::try_from(
+            transaction,
+            MessageHash::Compute,
+            None,
+        )
+        .unwrap()
+        .transaction_configuration(&FeatureSet::all_enabled())
+        .unwrap()
+        .priority_fee_lamports
+    }
+
+    #[test]
+    fn test_runtime_priority_fee_legacy_and_v0() {
+        for version in [LegacyOrV0::Legacy, LegacyOrV0::V0] {
+            assert_eq!(runtime_priority_fee(version, 1, 1), 1);
+            assert_eq!(runtime_priority_fee(version, 1_000_000, 123), 123);
+            assert_eq!(
+                runtime_priority_fee(version, u64::MAX, MAX_COMPUTE_UNIT_LIMIT),
+                u64::MAX
+            );
+        }
+    }
 
     #[test]
     fn test_try_into_config_legacy_and_v0() {
         let feature_set = FeatureSet::all_enabled();
 
-        let payer_keypair = Keypair::new();
+        let payer = Pubkey::new_from_array([11; 32]);
         let tx = SanitizedTransaction::from_transaction_for_tests(Transaction::new_unsigned(
             Message::new(
                 &[
@@ -206,7 +258,7 @@ mod tests {
                         (HEAP_LENGTH as u32).saturating_mul(2),
                     ),
                 ],
-                Some(&payer_keypair.pubkey()),
+                Some(&payer),
             ),
         ));
         let details = ComputeBudgetInstructionDetails::try_from(

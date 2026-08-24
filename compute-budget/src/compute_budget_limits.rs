@@ -58,14 +58,20 @@ impl ComputeBudgetLimits {
     }
 }
 
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "the u128 range and nonzero divisor are proved in verification/prioritization_fee.rs"
+)]
 fn get_prioritization_fee(compute_unit_price: u64, compute_unit_limit: u64) -> u64 {
     let micro_lamport_fee: MicroLamports =
-        (compute_unit_price as u128).saturating_mul(compute_unit_limit as u128);
-    micro_lamport_fee
-        .saturating_add(MICRO_LAMPORTS_PER_LAMPORT.saturating_sub(1) as u128)
-        .checked_div(MICRO_LAMPORTS_PER_LAMPORT as u128)
-        .and_then(|fee| u64::try_from(fee).ok())
-        .unwrap_or(u64::MAX)
+        (compute_unit_price as u128) * (compute_unit_limit as u128);
+    let lamport_fee = (micro_lamport_fee + (MICRO_LAMPORTS_PER_LAMPORT - 1) as u128)
+        / MICRO_LAMPORTS_PER_LAMPORT as u128;
+    if lamport_fee > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        lamport_fee as u64
+    }
 }
 
 #[cfg(test)]
@@ -81,6 +87,8 @@ mod test {
 
     #[test]
     fn test_new_with_compute_unit_price() {
+        assert_eq!(get_prioritization_fee(1, 1), 1);
+
         assert_eq!(
             get_prioritization_fee(MICRO_LAMPORTS_PER_LAMPORT - 1, 1),
             1,
@@ -97,11 +105,31 @@ mod test {
 
         assert_eq!(get_prioritization_fee(200, 100_000), 20);
 
+        const SATURATION_TEST_LIMIT: u64 = 1_400_000;
+        const GREATEST_UNSATURATED_PRICE: u64 = 13_176_245_766_935_394_010;
+        assert_eq!(
+            get_prioritization_fee(GREATEST_UNSATURATED_PRICE, SATURATION_TEST_LIMIT),
+            u64::MAX.saturating_sub(1)
+        );
+        assert_eq!(
+            get_prioritization_fee(
+                GREATEST_UNSATURATED_PRICE.saturating_add(1),
+                SATURATION_TEST_LIMIT
+            ),
+            u64::MAX
+        );
+
         assert_eq!(
             get_prioritization_fee(MICRO_LAMPORTS_PER_LAMPORT, u64::MAX),
             u64::MAX
         );
 
         assert_eq!(get_prioritization_fee(u64::MAX, u64::MAX), u64::MAX);
+        assert_eq!(get_prioritization_fee(u64::MAX, 0), 0);
+        assert_eq!(get_prioritization_fee(u64::MAX, 1), 18_446_744_073_710);
+        assert_eq!(
+            get_prioritization_fee(u64::MAX, MICRO_LAMPORTS_PER_LAMPORT),
+            u64::MAX
+        );
     }
 }
